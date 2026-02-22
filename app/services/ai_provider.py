@@ -1,12 +1,13 @@
 """
 AI provider abstraction layer.
 
-Supports two backends — select via AI_PROVIDER in .env:
-  - "openai"  → OpenAI GPT models (requires OPENAI_API_KEY)
-  - "gemini"  → Google Gemini models (requires GEMINI_API_KEY, free tier available)
+Supports three backends — select via AI_PROVIDER in .env:
+  - "openrouter" → OpenRouter (200+ models, free tier, recommended)
+  - "openai"     → OpenAI GPT models (requires OPENAI_API_KEY)
+  - "gemini"     → Google Gemini native SDK (requires GEMINI_API_KEY)
 
-Both providers share the same function signature so the rest of the codebase
-never needs to change when switching providers.
+OpenRouter uses the same OpenAI SDK — just a different base_url + api_key.
+All providers share identical function signatures.
 """
 import json
 import logging
@@ -40,12 +41,30 @@ with exactly two keys:
 Respond ONLY with valid JSON. No explanation, no markdown fences."""
 
 
-# ── OpenAI provider ───────────────────────────────────────────────────────────
+# ── OpenAI-compatible client helper ──────────────────────────────────────────
 def _get_openai_client():
+    """Standard OpenAI client."""
     from openai import AsyncOpenAI
     return AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
+def _get_openrouter_client():
+    """
+    OpenRouter uses identical API to OpenAI — just override base_url.
+    Pass extra headers so OpenRouter can track usage correctly.
+    """
+    from openai import AsyncOpenAI
+    return AsyncOpenAI(
+        api_key=settings.OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": settings.OPENROUTER_SITE_URL,
+            "X-Title": settings.OPENROUTER_APP_NAME,
+        },
+    )
+
+
+# ── OpenAI provider ───────────────────────────────────────────────────────────
 async def _openai_chat(user_message: str, history: List[Message]) -> str:
     client = _get_openai_client()
     messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
@@ -73,38 +92,52 @@ async def _openai_emotion(text: str) -> Tuple[str, float]:
         temperature=0.0,
         response_format={"type": "json_object"},
     )
+    return _parse_emotion_json(resp.choices[0].message.content or "{}")
+
+
+# ── OpenRouter provider ───────────────────────────────────────────────────────
+async def _openrouter_chat(user_message: str, history: List[Message]) -> str:
+    client = _get_openrouter_client()
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}]
+    messages.extend([{"role": m.role, "content": m.content} for m in history])
+    messages.append({"role": "user", "content": user_message})
+
+    response = await client.chat.completions.create(
+        model=settings.OPENROUTER_MODEL,
+        messages=messages,
+        max_tokens=settings.OPENAI_MAX_TOKENS,
+        temperature=settings.OPENAI_TEMPERATURE,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+async def _openrouter_emotion(text: str) -> Tuple[str, float]:
+    client = _get_openrouter_client()
+    resp = await client.chat.completions.create(
+        model=settings.OPENROUTER_MODEL,
+        messages=[
+            {"role": "system", "content": _EMOTION_PROMPT},
+            {"role": "user", "content": text[:1000]},
+        ],
+        max_tokens=80,
+        temperature=0.0,
+    )
     raw = resp.choices[0].message.content or "{}"
-    data = json.loads(raw)
-    emotion = data.get("emotion", "neutral")
-    confidence = float(data.get("confidence", 0.5))
-    if emotion not in _EMOTIONS:
-        emotion = "neutral"
-    return emotion, max(0.0, min(1.0, confidence))
+    # Some models wrap JSON in markdown fences — strip them
+    return _parse_emotion_json(_strip_md_fences(raw))
 
 
-# ── Gemini provider (google-genai SDK) ───────────────────────────────────────
-def _get_gemini_client():
-    """Return a configured google-genai async-capable client."""
-    from google import genai
-    return genai.Client(api_key=settings.GEMINI_API_KEY)
-
-
-def _build_gemini_contents(history: List[Message], user_message: str) -> List[dict]:
-    """Build the 'contents' list for the new google-genai SDK."""
-    contents = []
-    for m in history:
-        role = "user" if m.role == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": m.content}]})
-    contents.append({"role": "user", "parts": [{"text": user_message}]})
-    return contents
-
-
+# ── Gemini provider (native SDK) ──────────────────────────────────────────────
 async def _gemini_chat(user_message: str, history: List[Message]) -> str:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=settings.GEMINI_API_KEY)
-    contents = _build_gemini_contents(history, user_message)
+    contents = []
+    for m in history:
+        role = "user" if m.role == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": m.content}]})
+    contents.append({"role": "user", "parts": [{"text": user_message}]})
 
     response = await client.aio.models.generate_content(
         model=settings.GEMINI_MODEL,
@@ -128,23 +161,29 @@ async def _gemini_emotion(text: str) -> Tuple[str, float]:
     response = await client.aio.models.generate_content(
         model=settings.GEMINI_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            max_output_tokens=80,
-        ),
+        config=types.GenerateContentConfig(temperature=0.0, max_output_tokens=80),
     )
+    return _parse_emotion_json(_strip_md_fences(response.text.strip()))
 
-    raw = response.text.strip()
-    # Strip markdown fences if Gemini adds them
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+
+# ── JSON helpers ──────────────────────────────────────────────────────────────
+def _strip_md_fences(text: str) -> str:
+    """Remove ```json ... ``` fences that some models add."""
+    t = text.strip()
+    if t.startswith("```"):
+        parts = t.split("```")
+        # parts[1] is the content between first pair of fences
+        t = parts[1]
+        if t.startswith("json"):
+            t = t[4:]
+    return t.strip()
+
+
+def _parse_emotion_json(raw: str) -> Tuple[str, float]:
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         return "neutral", 0.5
-
     emotion = data.get("emotion", "neutral")
     confidence = float(data.get("confidence", 0.5))
     if emotion not in _EMOTIONS:
@@ -159,8 +198,11 @@ async def get_ai_response(user_message: str, history: List[Message]) -> str:
     Raises RuntimeError on failure (caught by ChatService → 503 response).
     """
     provider = settings.AI_PROVIDER.lower()
+    logger.info("Using AI provider: %s", provider)
     try:
-        if provider == "gemini":
+        if provider == "openrouter":
+            return await _openrouter_chat(user_message, history)
+        elif provider == "gemini":
             return await _gemini_chat(user_message, history)
         else:
             return await _openai_chat(user_message, history)
@@ -178,7 +220,9 @@ async def analyse_emotion(text: str) -> Tuple[str, float]:
     """
     provider = settings.AI_PROVIDER.lower()
     try:
-        if provider == "gemini":
+        if provider == "openrouter":
+            return await _openrouter_emotion(text)
+        elif provider == "gemini":
             return await _gemini_emotion(text)
         else:
             return await _openai_emotion(text)

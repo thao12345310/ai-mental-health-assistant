@@ -28,8 +28,14 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # ── AI Provider ───────────────────────────────────────────────────────────
-    # Set to "openai" or "gemini"
-    AI_PROVIDER: str = "gemini"
+    # Set to "openrouter", "openai", or "gemini"
+    AI_PROVIDER: str = "openrouter"
+
+    # ── OpenRouter ────────────────────────────────────────────────────────────
+    OPENROUTER_API_KEY: str = "sk-or-your-key-here"
+    OPENROUTER_MODEL: str = "meta-llama/llama-3.1-8b-instruct:free"
+    OPENROUTER_SITE_URL: str = "http://localhost:3000"
+    OPENROUTER_APP_NAME: str = "MindCare AI"
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str = "sk-your-openai-api-key"
