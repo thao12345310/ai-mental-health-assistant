@@ -27,11 +27,19 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # ── AI Provider ───────────────────────────────────────────────────────────
+    # Set to "openai" or "gemini"
+    AI_PROVIDER: str = "gemini"
+
     # ── OpenAI ────────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str = "sk-your-openai-api-key"
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_MAX_TOKENS: int = 1024
     OPENAI_TEMPERATURE: float = 0.7
+
+    # ── Google Gemini ─────────────────────────────────────────────────────────
+    GEMINI_API_KEY: str = "your-gemini-api-key"
+    GEMINI_MODEL: str = "gemini-1.5-flash"
 
     # ── Crisis Detection ──────────────────────────────────────────────────────
     CRISIS_HOTLINE: str = "988 (Suicide & Crisis Lifeline)"
