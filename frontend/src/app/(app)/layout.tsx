@@ -2,6 +2,7 @@
 import { useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
+import ThemeToggle from '@/components/ThemeToggle';
 import Link from 'next/link';
 
 const NAV = [
@@ -55,6 +56,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
         </nav>
+
+        {/* Theme Toggle */}
+        <div style={{ padding: '8px 0' }}>
+          <ThemeToggle />
+        </div>
 
         <div className="sidebar-user">
           <div className="sidebar-user-info">
